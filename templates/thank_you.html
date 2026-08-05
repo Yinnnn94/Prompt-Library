@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="jumbotron text-center">
+    <h1 class="display-3 text-success">🎉 感謝您的分享！</h1>
+    <p class="lead">您的 Prompt 已成功提交，目前正在等待管理員審核。</p>
+    <hr class="my-4">
+    <p>審核通過後，您的 Prompt 將會顯示在 Prompt Library 的主頁面上。</p>
+    <p class="lead">
+        <a class="btn btn-primary btn-lg" href="{{ url_for('home') }}" role="button">返回 Prompt Library 首頁</a>
+    </p>
+</div>
+{% endblock %}

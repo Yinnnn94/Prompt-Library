@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="mb-4 text-warning">✏️ 編輯 Prompt：{{ prompt.title }}</h1>
+<p class="lead">您可以修正內容、更改分類，或調整審核狀態。</p>
+
+<div class="card p-4 shadow-lg">
+    <form method="POST" action="{{ url_for('admin_edit_prompt', prompt_id=prompt.id) }}">
+        
+        <div class="mb-3">
+            <label for="category" class="form-label">選擇 Prompt 分類</label>
+            <select class="form-select" id="category" name="category" required>
+                {% for cat in categories %}
+                <option value="{{ cat }}" {% if cat == prompt.category %}selected{% endif %}>{{ cat }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="mb-3">
+            <label for="title" class="form-label">Prompt 標題</label>
+            <input type="text" class="form-control" id="title" name="title" value="{{ prompt.title }}" required>
+        </div>
+        
+        <div class="mb-3">
+            <label for="content" class="form-label">Prompt 內容</label>
+            <textarea class="form-control" id="content" name="content" rows="10" required>{{ prompt.content }}</textarea>
+        </div>
+        
+        <div class="mb-3">
+            <p>
+                <strong>當前審核狀態：</strong>
+                {% if prompt.is_approved %}
+                    <span class="badge bg-success">✅ 已發布/通過審核</span>
+                {% else %}
+                    <span class="badge bg-danger">⏳ 待審核</span>
+                {% endif %}
+            </p>
+        </div>
+        
+        <button type="submit" class="btn btn-warning btn-lg me-2">💾 儲存修改</button>
+        <a href="{{ url_for('admin_review') }}" class="btn btn-secondary">取消並返回</a>
+    </form>
+</div>
+
+{% endblock %}

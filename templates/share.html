@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="mb-4">🚀 提交你的 Prompt，等待審核分享</h1>
+<p class="lead">請填寫 Prompt 內容。提交後，它將進入管理員審核流程。</p>
+
+<div class="card p-4 shadow-lg">
+    <form method="POST" action="{{ url_for('share_prompt') }}">
+        
+        <div class="mb-3">
+            <label for="category" class="form-label">選擇 Prompt 分類</label>
+            <select class="form-select" id="category" name="category" required>
+                {% for cat in categories %}
+                <option value="{{ cat }}">{{ cat }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-text">請選擇最適合您 Prompt 的部門或類型。</div>
+        </div>
+        <div class="mb-3">
+            <label for="title" class="form-label">Prompt 標題</label>
+            <input type="text" class="form-control" id="title" name="title" required>
+            <div class="form-text">給你的 Prompt 一個簡潔的標題。</div>
+        </div>
+        <div class="mb-3">
+            <label for="content" class="form-label">Prompt 內容</label>
+            <textarea class="form-control" id="content" name="content" rows="8" required></textarea>
+            <div class="form-text">貼上你的完整 Prompt，例如：角色設定、目標、輸出格式等。</div>
+        </div>
+        <button type="submit" class="btn btn-success btn-lg">提交 Prompt</button>
+    </form>
+</div>
+
+{% endblock %}

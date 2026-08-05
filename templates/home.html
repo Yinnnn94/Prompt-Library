@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="mb-4">公開 Prompt Library ✨</h1>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-8">
+        <form method="GET" action="{{ url_for('home') }}" class="input-group">
+            <input type="text" name="query" class="form-control" placeholder="搜尋標題或內容..." value="{{ current_query or '' }}">
+            <input type="hidden" name="category" value="{{ selected_category }}">
+            <button class="btn btn-primary" type="submit">🔍 搜尋</button>
+        </form>
+    </div>
+    <div class="col-md-4">
+        <div class="dropdown w-100">
+            <button class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown">
+                分類：{{ selected_category }}
+            </button>
+            <ul class="dropdown-menu w-100 shadow">
+                <li><a class="dropdown-item {% if selected_category == '所有分類' %}active{% endif %}" 
+                       href="{{ url_for('home', query=current_query) }}">所有分類</a></li>
+                <li><hr class="dropdown-divider"></li>
+                {% for cat in categories %}
+                <li>
+                    <a class="dropdown-item {% if cat == selected_category %}active{% endif %}" 
+                       href="{{ url_for('home', category=cat, query=current_query) }}">
+                        {{ cat }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</div>
+
+{% if prompts %}
+    <div class="row row-cols-1 row-cols-md-2 g-4">
+    {% for prompt in prompts %}
+        <div class="col">
+            <div class="card h-100 shadow-sm border-0">
+                <div class="card-body">
+                    <span class="badge bg-{{ get_category_color(prompt.category) }} mb-2">{{ prompt.category }}</span> 
+                    <h5 class="card-title text-primary fw-bold">{{ prompt.title }}</h5>
+                    
+                    <div class="d-flex flex-column">
+                        <pre id="prompt-content-{{ prompt.id }}" class="bg-light p-3 rounded border flex-grow-1" style="max-height: 300px;">{{ prompt.content }}</pre>
+                        
+                        <button class="btn btn-outline-primary btn-sm mt-2 copy-btn" 
+                                type="button" 
+                                data-id="{{ prompt.id }}">
+                            📋 一鍵複製 Prompt
+                        </button>
+                    </div>
+                </div>
+                <div class="card-footer bg-transparent border-top-0">
+                    <small class="text-muted">已公開發布</small> 
+                </div>
+            </div>
+        </div>
+    {% endfor %}
+    </div>
+{% else %}
+    <div class="alert alert-info text-center py-5 shadow-sm" role="alert">
+        <p class="mb-0">查無結果，請嘗試其他關鍵字或分類。</p>
+        <a href="{{ url_for('home') }}" class="btn btn-link mt-2">回首頁</a>
+    </div>
+{% endif %}
+
+{% endblock %}

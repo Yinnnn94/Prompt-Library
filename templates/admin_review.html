@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="mb-4 text-warning">🛡️ 管理員審核與管理中心</h1>
+
+<div class="mb-4">
+    <h5>篩選 Prompts：</h5>
+    <div class="btn-group" role="group" aria-label="Prompt Status Filter">
+        
+        <a href="{{ url_for('admin_review', status='all') }}" 
+           class="btn {% if filter_status == 'all' %}btn-primary{% else %}btn-outline-primary{% endif %}">
+            全部 ({{ prompts | length }})
+        </a>
+        
+        <a href="{{ url_for('admin_review', status='approved') }}" 
+           class="btn {% if filter_status == 'approved' %}btn-success{% else %}btn-outline-success{% endif %}">
+            ✅ 已發佈 ({{ prompts | selectattr('is_approved') | list | length }})
+        </a>
+        
+        <a href="{{ url_for('admin_review', status='pending') }}" 
+           class="btn {% if filter_status == 'pending' %}btn-danger{% else %}btn-outline-danger{% endif %}">
+            ⏳ 待審核 ({{ prompts | rejectattr('is_approved') | list | length }})
+        </a>
+    </div>
+    <p class="mt-2 text-muted">
+        {% if filter_status == 'all' %}
+            顯示所有已提交的 Prompts。
+        {% elif filter_status == 'approved' %}
+            <span class="text-success">僅顯示已發佈的 Prompts。</span>
+        {% elif filter_status == 'pending' %}
+            <span class="text-danger">僅顯示待審核的 Prompts。</span>
+        {% endif %}
+    </p>
+</div>
+{% if prompts %}
+    <div class="list-group">
+    {% for prompt in prompts %}
+        {% if prompt.is_approved %}
+            <div class="list-group-item list-group-item-action mb-3 shadow-sm border border-success">
+        {% else %}
+            <div class="list-group-item list-group-item-action mb-3 shadow-sm border border-danger">
+        {% endif %}
+            
+            <div class="d-flex w-100 justify-content-between">
+                <div>
+                    <h5 class="mb-1 text-primary">{{ prompt.title }}</h5>
+                    {% if prompt.is_approved %}
+                        <span class="badge bg-success">✅ 已發佈</span>
+                    {% else %}
+                        <span class="badge bg-danger">⏳ 待審核</span>
+                    {% endif %}
+                    
+                    <span class="badge bg-{{ get_category_color(prompt.category) }}">{{ prompt.category }}</span>
+                </div>
+                <small class="text-muted">作者: {{ prompt.author.upn }}</small>
+            </div>
+            
+            <p class="mb-1 mt-2">
+                <pre class="bg-light p-2 rounded">{{ prompt.content }}</pre>
+            </p>
+            
+            <div class="text-end mt-2">
+                
+                <a href="{{ url_for('admin_edit_prompt', prompt_id=prompt.id) }}" 
+                   class="btn btn-warning btn-sm me-2">
+                    ✏️ 編輯與修正
+                </a>
+                
+                {% if not prompt.is_approved %}
+                <a href="{{ url_for('approve_prompt', prompt_id=prompt.id) }}" 
+                   class="btn btn-success btn-sm me-2">
+                    ✅ 通過審核並發布
+                </a>
+                {% else %}
+                <a href="{{ url_for('unapprove_prompt', prompt_id=prompt.id) }}" 
+                   class="btn btn-danger btn-sm me-2">
+                    🚫 下架 (取消發布)
+                </a>
+                {% endif %}
+                
+                <form method="POST" action="{{ url_for('admin_delete_prompt', prompt_id=prompt.id) }}" 
+                      class="d-inline" 
+                      onsubmit="return confirm('確定要永久刪除 Prompt: {{ prompt.title }} 嗎？此操作無法撤銷！');">
+                    <button type="submit" class="btn btn-outline-danger btn-sm">
+                        🗑️ 永久刪除
+                    </button>
+                </form>
+                
+            </div>
+        </div>
+    {% endfor %}
+    </div>
+{% else %}
+    <div class="alert alert-info" role="alert">
+        {% if filter_status == 'all' %}
+            目前沒有已提交的 Prompts。
+        {% elif filter_status == 'approved' %}
+            目前沒有已發佈的 Prompts。
+        {% elif filter_status == 'pending' %}
+            目前沒有待審核的 Prompts。
+        {% endif %}
+    </div>
+{% endif %}
+
+{% endblock %}
