@@ -1,6 +1,8 @@
 import config
+import os
 from flask import Flask, redirect, url_for, session, request, render_template, flash
-from prompt_library.database_createse import db, Prompt, User
+from database_create import SessionLocal, Prompt, User, Category
+from sqlalchemy import select
 import msal
 import requests
 from functools import wraps
@@ -8,8 +10,17 @@ import uuid
 
 app = Flask(__name__)
 app.config.from_object(config)
-app.secret_key = 'super_secret_key' # 在實際應用中請使用更安全的密鑰
-db.init_app(app)
+app.secret_key = os.getenv('SECRET_KEY', 'default-change-in-production')
+
+def get_or_create_category(db, category_name):
+    """Get category ID by name, create if doesn't exist"""
+    category = db.query(Category).filter_by(name=category_name).first()
+    if not category:
+        category = Category(name=category_name)
+        db.add(category)
+        db.commit()
+        db.refresh(category)
+    return category.id
 
 CATEGORY_COLORS = {
     'HR': 'info',       # 藍色
@@ -26,8 +37,7 @@ def utility_processor():
         return CATEGORY_COLORS.get(category, 'light') # 默認為淺色
     return dict(get_category_color=get_category_color)
 
-with app.app_context():
-    db.create_all()
+# 用 migrations 管理 schema，不需要 create_all()
 
 # -----------------
 # 🎯 AAD 身份驗證路由
@@ -55,7 +65,7 @@ def login():
 def auth_callback():
     """處理 AAD 登入回呼"""
     if request.args.get('state') != session.get("state"):
-        return redirect(url_for("home")) # 狀態碼不匹配，拒絕
+        return redirect(url_for("home"))
     if "error" in request.args:
         flash(f"Login failed: {request.args['error_description']}", 'danger')
         return redirect(url_for("home"))
@@ -67,25 +77,26 @@ def auth_callback():
         redirect_uri=config.REDIRECT_URI)
 
     if "access_token" in result:
-        # 取得使用者資料 (ID Token 包含基本資訊)
         id_token_claims = result['id_token_claims']
         upn = id_token_claims.get('upn', id_token_claims.get('preferred_username'))
         oid = id_token_claims.get('oid')
 
-        # 檢查或創建使用者
-        user = User.query.filter_by(oid=oid).first()
-        if not user:
-            # 設定管理員權限
-            is_admin = upn in config.ADMINS
-            user = User(oid=oid, upn=upn, is_admin=is_admin)
-            db.session.add(user)
-            db.session.commit()
-            
-        session["user"] = {"upn": upn, "oid": oid, "is_admin": user.is_admin}
-        session["access_token"] = result.get("access_token")
-        
-        return redirect(url_for("home"))
-    
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter_by(oid=oid).first()
+            if not user:
+                is_admin = upn in config.ADMINS
+                user = User(oid=oid, upn=upn, is_admin=is_admin)
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+
+            session["user"] = {"upn": upn, "oid": oid, "is_admin": user.is_admin}
+            session["access_token"] = result.get("access_token")
+            return redirect(url_for("home"))
+        finally:
+            db.close()
+
     flash("AAD Authentication failed.", 'danger')
     return redirect(url_for("home"))
 
@@ -110,67 +121,71 @@ def login_required(f):
     return decorated_function
 
 @app.route("/")
-@app.route("/")
 def home():
-    # 獲取 URL 參數
     query = request.args.get('query')
     selected_category = request.args.get('category', '所有分類')
-    categories = ['HR', 'RD', '通用型', '行銷', '其他']
-    
-    # 基礎查詢：只顯示已發布的
-    prompts_query = Prompt.query.filter_by(is_approved=True)
-    
-    # 1. 分類篩選邏輯
-    if selected_category and selected_category != '所有分類':
-        prompts_query = prompts_query.filter_by(category=selected_category)
-    
-    # 2. 搜尋關鍵字邏輯
-    if query:
-        search_term = f"%{query}%"
-        prompts_query = prompts_query.filter(
-            (Prompt.title.like(search_term)) | (Prompt.content.like(search_term))
-        )
-    
-    # 執行查詢 (按 ID 倒序排列，最新的在前)
-    approved_prompts = prompts_query.order_by(Prompt.id.desc()).all()
-    
-    return render_template("home.html", 
-                           prompts=approved_prompts, 
-                           categories=categories,
-                           selected_category=selected_category,
-                           current_query=query)
+
+    db = SessionLocal()
+    try:
+        categories = [c.name for c in db.query(Category).all()]
+        prompts_query = db.query(Prompt).filter_by(is_approved=True)
+
+        if selected_category and selected_category != '所有分類':
+            category = db.query(Category).filter_by(name=selected_category).first()
+            if category:
+                prompts_query = prompts_query.filter_by(category_id=category.id)
+
+        if query:
+            search_term = f"%{query}%"
+            prompts_query = prompts_query.filter(
+                (Prompt.title.like(search_term)) | (Prompt.content.like(search_term))
+            )
+
+        approved_prompts = prompts_query.order_by(Prompt.id.desc()).all()
+
+        return render_template("home.html",
+                               prompts=approved_prompts,
+                               categories=categories,
+                               selected_category=selected_category,
+                               current_query=query)
+    finally:
+        db.close()
 
 @app.route("/share_prompt", methods=["GET", "POST"])
 @login_required
 def share_prompt():
     """讓使用者分享自己的 Prompt"""
-    categories = ['HR', 'RD', '通用型', '行銷', '其他']
-    
-    if request.method == "POST":
-        user = User.query.filter_by(oid=session['user']['oid']).first()
-        if not user:
-            flash("使用者資料錯誤。", 'danger')
-            return redirect(url_for('home'))
+    db = SessionLocal()
+    try:
+        categories = [c.name for c in db.query(Category).all()]
 
-        tags_input = request.form.get("tags", "")
-        tags_list = [tag.strip() for tag in tags_input.split(',') if tag.strip()]
+        if request.method == "POST":
+            user = db.query(User).filter_by(oid=session['user']['oid']).first()
+            if not user:
+                flash("使用者資料錯誤。", 'danger')
+                return redirect(url_for('home'))
 
-        new_prompt = Prompt(
-            title=request.form.get("title"),
-            content=request.form.get("content"),
-            category=request.form.get("category"),
-            description=request.form.get("description"),
-            is_shared=True,
-            is_approved=False,
-            user_id=user.id
-        )
-        new_prompt.set_tags(tags_list)
-        db.session.add(new_prompt)
-        db.session.commit()
-        return redirect(url_for("thank_you"))
-    
-    # 傳遞分類列表給 share.html
-    return render_template("share.html", categories=categories)
+            tags_input = request.form.get("tags", "")
+            tags_list = [tag.strip() for tag in tags_input.split(',') if tag.strip()]
+
+            category_id = get_or_create_category(db, request.form.get("category"))
+            new_prompt = Prompt(
+                title=request.form.get("title"),
+                content=request.form.get("content"),
+                category_id=category_id,
+                description=request.form.get("description"),
+                is_shared=True,
+                is_approved=False,
+                user_id=user.id
+            )
+            new_prompt.set_tags(tags_list)
+            db.add(new_prompt)
+            db.commit()
+            return redirect(url_for("thank_you"))
+
+        return render_template("share.html", categories=categories)
+    finally:
+        db.close()
 
 # -----------------
 # 🛡️ 管理員審核路由
@@ -191,101 +206,206 @@ def admin_required(f):
 @admin_required
 def admin_review():
     """顯示所有已提交的 Prompts，並支持按狀態篩選"""
-    
-    # 獲取 URL 查詢參數中的 'status'
-    # 'all': 全部, 'approved': 已發佈, 'pending': 待審核
     filter_status = request.args.get('status', 'all')
-    
-    # 基礎查詢：只查詢已分享/提交的 Prompts
-    query = Prompt.query.filter_by(is_shared=True)
 
-    if filter_status == 'approved':
-        # 篩選已發佈的
-        query = query.filter_by(is_approved=True)
-    elif filter_status == 'pending':
-        # 篩選待審核的
-        query = query.filter_by(is_approved=False)
-    
-    # 排序：優先顯示未審核的 (如果 filter_status='all')
-    all_submitted_prompts = query.order_by(Prompt.is_approved.asc()).all()
-    
-    # 傳遞給模板
-    return render_template("admin_review.html", 
-                           prompts=all_submitted_prompts, 
-                           filter_status=filter_status
-                          )
+    db = SessionLocal()
+    try:
+        query = db.query(Prompt).filter_by(is_shared=True)
+
+        if filter_status == 'approved':
+            query = query.filter_by(is_approved=True)
+        elif filter_status == 'pending':
+            query = query.filter_by(is_approved=False)
+
+        all_submitted_prompts = query.order_by(Prompt.is_approved.asc()).join(Category).all()
+
+        return render_template("admin_review.html",
+                               prompts=all_submitted_prompts,
+                               filter_status=filter_status)
+    finally:
+        db.close()
 
 @app.route("/admin/approve/<int:prompt_id>")
 @admin_required
 def approve_prompt(prompt_id):
     """審核並通過 Prompt (發布)"""
-    prompt = Prompt.query.get_or_404(prompt_id)
-    if not prompt.is_approved:
-        prompt.is_approved = True
-        db.session.commit()
-        flash(f"Prompt '{prompt.title}' 已成功通過審核，現在已公開。", 'success')
-    return redirect(url_for("admin_review"))
+    db = SessionLocal()
+    try:
+        prompt = db.query(Prompt).filter_by(id=prompt_id).first()
+        if not prompt:
+            flash("Prompt not found.", 'danger')
+            return redirect(url_for("admin_review"))
+        if not prompt.is_approved:
+            prompt.is_approved = True
+            db.commit()
+            flash(f"Prompt '{prompt.title}' 已成功通過審核，現在已公開。", 'success')
+        return redirect(url_for("admin_review"))
+    finally:
+        db.close()
 
 
 @app.route("/admin/unapprove/<int:prompt_id>")
 @admin_required
 def unapprove_prompt(prompt_id):
     """將已發布的 Prompt 下架 (unpublish)"""
-    prompt = Prompt.query.get_or_404(prompt_id)
-    if prompt.is_approved:
-        # 將狀態設回 False，使其不再顯示在主頁
-        prompt.is_approved = False
-        db.session.commit()
-        flash(f"Prompt '{prompt.title}' 已成功下架 (取消發布)，現在為待審核狀態。", 'warning')
-    else:
-        flash(f"Prompt '{prompt.title}' 本來就未發布。", 'info')
-        
-    return redirect(url_for("admin_review"))
+    db = SessionLocal()
+    try:
+        prompt = db.query(Prompt).filter_by(id=prompt_id).first()
+        if not prompt:
+            flash("Prompt not found.", 'danger')
+            return redirect(url_for("admin_review"))
+        if prompt.is_approved:
+            prompt.is_approved = False
+            db.commit()
+            flash(f"Prompt '{prompt.title}' 已成功下架 (取消發布)，現在為待審核狀態。", 'warning')
+        else:
+            flash(f"Prompt '{prompt.title}' 本來就未發布。", 'info')
+        return redirect(url_for("admin_review"))
+    finally:
+        db.close()
 
 
 @app.route("/admin/delete/<int:prompt_id>", methods=["POST"])
 @admin_required
 def admin_delete_prompt(prompt_id):
     """管理員刪除 Prompt"""
-    prompt = Prompt.query.get_or_404(prompt_id)
-    title = prompt.title
-    
-    # 執行刪除操作
-    db.session.delete(prompt)
-    db.session.commit()
-    
-    flash(f"Prompt '{title}' 已被管理員永久刪除。", 'danger')
-    
-    # 刪除後導回審核頁面
-    return redirect(url_for("admin_review"))
+    db = SessionLocal()
+    try:
+        prompt = db.query(Prompt).filter_by(id=prompt_id).first()
+        if not prompt:
+            flash("Prompt not found.", 'danger')
+            return redirect(url_for("admin_review"))
+        title = prompt.title
+        db.delete(prompt)
+        db.commit()
+        flash(f"Prompt '{title}' 已被管理員永久刪除。", 'danger')
+        return redirect(url_for("admin_review"))
+    finally:
+        db.close()
 
 @app.route("/admin/edit/<int:prompt_id>", methods=["GET", "POST"])
 @admin_required
 def admin_edit_prompt(prompt_id):
     """管理員編輯 Prompt 內容和分類"""
-    prompt = Prompt.query.get_or_404(prompt_id)
-    categories = ['HR', 'RD', '通用型', '行銷', '其他']
+    db = SessionLocal()
+    try:
+        categories = [c.name for c in db.query(Category).all()]
+        prompt = db.query(Prompt).filter_by(id=prompt_id).first()
+        if not prompt:
+            flash("Prompt not found.", 'danger')
+            return redirect(url_for("admin_review"))
 
-    if request.method == "POST":
-        prompt.title = request.form.get("title")
-        prompt.content = request.form.get("content")
-        prompt.category = request.form.get("category")
-        prompt.description = request.form.get("description")
+        if request.method == "POST":
+            prompt.title = request.form.get("title")
+            prompt.content = request.form.get("content")
+            prompt.category_id = get_or_create_category(db, request.form.get("category"))
+            prompt.description = request.form.get("description")
 
-        tags_input = request.form.get("tags", "")
-        tags_list = [tag.strip() for tag in tags_input.split(',') if tag.strip()]
-        prompt.set_tags(tags_list)
+            tags_input = request.form.get("tags", "")
+            tags_list = [tag.strip() for tag in tags_input.split(',') if tag.strip()]
+            prompt.set_tags(tags_list)
 
-        db.session.commit()
-        flash(f"Prompt '{prompt.title}' 已成功更新。", 'success')
-        return redirect(url_for("admin_review"))
+            db.commit()
+            flash(f"Prompt '{prompt.title}' 已成功更新。", 'success')
+            return redirect(url_for("admin_review"))
 
-    # GET 請求：顯示編輯表單
-    return render_template("admin_edit.html", 
-                           prompt=prompt, 
-                           categories=categories, 
-                           is_admin=session['user']['is_admin'])
+        return render_template("admin_edit.html",
+                               prompt=prompt,
+                               categories=categories,
+                               is_admin=session['user']['is_admin'])
+    finally:
+        db.close()
 # 省略其他路由...
+@app.route("/admin/categories")
+@admin_required
+def admin_categories():
+    """管理分類"""
+    db = SessionLocal()
+    try:
+        categories = db.query(Category).all()
+        return render_template("admin_categories.html", categories=categories)
+    finally:
+        db.close()
+
+@app.route("/admin/add_category", methods=["POST"])
+@admin_required
+def admin_add_category():
+    """新增分類"""
+    db = SessionLocal()
+    try:
+        category_name = request.form.get("name", "").strip()
+        if not category_name:
+            flash("分類名稱不能為空。", 'warning')
+            return redirect(url_for('admin_categories'))
+
+        existing = db.query(Category).filter_by(name=category_name).first()
+        if existing:
+            flash(f"分類 '{category_name}' 已存在。", 'warning')
+            return redirect(url_for('admin_categories'))
+
+        new_category = Category(name=category_name)
+        db.add(new_category)
+        db.commit()
+        flash(f"分類 '{category_name}' 已成功新增。", 'success')
+        return redirect(url_for('admin_categories'))
+    finally:
+        db.close()
+
+@app.route("/admin/edit_category/<int:category_id>", methods=["GET", "POST"])
+@admin_required
+def admin_edit_category(category_id):
+    """編輯分類"""
+    db = SessionLocal()
+    try:
+        category = db.query(Category).filter_by(id=category_id).first()
+        if not category:
+            flash("分類不存在。", 'danger')
+            return redirect(url_for('admin_categories'))
+
+        if request.method == "POST":
+            new_name = request.form.get("name", "").strip()
+            if not new_name:
+                flash("分類名稱不能為空。", 'warning')
+                return redirect(url_for('admin_edit_category', category_id=category_id))
+
+            existing = db.query(Category).filter_by(name=new_name).first()
+            if existing and existing.id != category_id:
+                flash(f"分類 '{new_name}' 已存在。", 'warning')
+                return redirect(url_for('admin_edit_category', category_id=category_id))
+
+            old_name = category.name
+            category.name = new_name
+            db.commit()
+            flash(f"分類已成功更新：'{old_name}' → '{new_name}'。", 'success')
+            return redirect(url_for('admin_categories'))
+
+        return render_template("admin_edit_category.html", category=category)
+    finally:
+        db.close()
+
+@app.route("/admin/delete_category/<int:category_id>", methods=["POST"])
+@admin_required
+def admin_delete_category(category_id):
+    """刪除分類"""
+    db = SessionLocal()
+    try:
+        category = db.query(Category).filter_by(id=category_id).first()
+        if not category:
+            flash("分類不存在。", 'danger')
+            return redirect(url_for('admin_categories'))
+
+        category_name = category.name
+        db.delete(category)
+        db.commit()
+        flash(f"分類 '{category_name}' 已成功刪除。", 'success')
+        return redirect(url_for('admin_categories'))
+    except Exception as e:
+        db.rollback()
+        flash(f"刪除失敗，該分類可能仍有相關的 Prompt。", 'danger')
+        return redirect(url_for('admin_categories'))
+    finally:
+        db.close()
+
 @app.route("/thank_you")
 def thank_you():
     """新的感謝頁面路由"""
@@ -298,15 +418,22 @@ def thank_you():
 @app.route("/api/prompt/<int:prompt_id>", methods=["GET"])
 def get_prompt(prompt_id):
     """根據 ID 獲取單一 Prompt 的完整內容"""
-    prompt = Prompt.query.filter_by(id=prompt_id, is_approved=True).first_or_404()
-    return {
-        'id': prompt.id,
-        'title': prompt.title,
-        'category': prompt.category,
-        'description': prompt.description,
-        'tags': prompt.get_tags(),
-        'content': prompt.content
-    }
+    db = SessionLocal()
+    try:
+        prompt = db.query(Prompt).filter_by(id=prompt_id, is_approved=True).first()
+        if not prompt:
+            return {'error': 'Prompt not found'}, 404
+        return {
+            'id': prompt.id,
+            'title': prompt.title,
+            'category': prompt.category,
+            'description': prompt.description,
+            'tags': prompt.get_tags(),
+            'content': prompt.content
+        }
+    finally:
+        db.close()
+
 
 @app.route("/api/search_by_intent", methods=["POST"])
 def search_by_intent():
@@ -317,50 +444,50 @@ def search_by_intent():
     if not intent:
         return {"error": "intent 不能為空"}, 400
 
-    approved_prompts = Prompt.query.filter_by(is_approved=True).all()
+    db = SessionLocal()
+    try:
+        approved_prompts = db.query(Prompt).filter_by(is_approved=True).all()
 
-    results = []
-    for prompt in approved_prompts:
-        score = 0
+        results = []
+        for prompt in approved_prompts:
+            score = 0
 
-        # 標題匹配 (權重最高)
-        if intent in prompt.title.lower():
-            score += 10
+            if intent in prompt.title.lower():
+                score += 10
 
-        # 描述匹配
-        if prompt.description and intent in prompt.description.lower():
-            score += 5
+            if prompt.description and intent in prompt.description.lower():
+                score += 5
 
-        # 標籤匹配
-        if prompt.tags:
-            tags = prompt.get_tags()
-            for tag in tags:
-                if intent in tag.lower():
-                    score += 3
+            if prompt.tags:
+                tags = prompt.get_tags()
+                for tag in tags:
+                    if intent in tag.lower():
+                        score += 3
 
-        # 內容匹配
-        if intent in prompt.content.lower():
-            score += 1
+            if intent in prompt.content.lower():
+                score += 1
 
-        if score > 0:
-            results.append({
-                'id': prompt.id,
-                'title': prompt.title,
-                'category': prompt.category,
-                'description': prompt.description,
-                'tags': prompt.get_tags(),
-                'content': prompt.content,
-                'score': score
-            })
+            if score > 0:
+                category_name = prompt.category.name if prompt.category else 'Unknown'
+                results.append({
+                    'id': prompt.id,
+                    'title': prompt.title,
+                    'category': category_name,
+                    'description': prompt.description,
+                    'tags': prompt.get_tags(),
+                    'content': prompt.content,
+                    'score': score
+                })
 
-    # 按相關度排序
-    results.sort(key=lambda x: x['score'], reverse=True)
+        results.sort(key=lambda x: x['score'], reverse=True)
 
-    return {
-        'intent': intent,
-        'results': results,
-        'count': len(results)
-    }
+        return {
+            'intent': intent,
+            'results': results,
+            'count': len(results)
+        }
+    finally:
+        db.close()
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
