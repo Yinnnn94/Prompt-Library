@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="mb-4 text-warning">✏️ 編輯分類</h1>
+
+<div class="card">
+    <div class="card-header bg-warning text-dark">
+        <h5 class="mb-0">編輯分類: {{ category.name }}</h5>
+    </div>
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('admin_edit_category', category_id=category.id) }}">
+            <div class="mb-3">
+                <label for="name" class="form-label">分類名稱</label>
+                <input type="text" class="form-control" id="name" name="name" value="{{ category.name }}" required>
+            </div>
+
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-success">💾 儲存變更</button>
+                <a href="{{ url_for('admin_categories') }}" class="btn btn-secondary">❌ 取消</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% endblock %}
