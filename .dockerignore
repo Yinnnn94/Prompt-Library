@@ -1,0 +1,10 @@
+.env
+.env.docker
+README.md
+MIGRATION_GUIDE.md
+Dockerfile
+.git
+.gitignore
+__pycache__
+*.pyc
+venv
