@@ -22,9 +22,14 @@
             <div class="form-text">給你的 Prompt 一個簡潔的標題。</div>
         </div>
         <div class="mb-3">
+            <label for="description" class="form-label">Prompt 描述 (選填)</label>
+            <textarea class="form-control" id="description" name="description" rows="3" placeholder="簡短說明此 Prompt 的用途"></textarea>
+            <div class="form-text">簡要描述這個 Prompt 的用途或特點。標籤將自動根據內容生成。</div>
+        </div>
+        <div class="mb-3">
             <label for="content" class="form-label">Prompt 內容</label>
             <textarea class="form-control" id="content" name="content" rows="8" required></textarea>
-            <div class="form-text">貼上你的完整 Prompt，例如：角色設定、目標、輸出格式等。</div>
+            <div class="form-text">貼上你的完整 Prompt，例如：角色設定、目標、輸出格式等。AI 將自動分析並生成相關標籤。</div>
         </div>
         <button type="submit" class="btn btn-success btn-lg">提交 Prompt</button>
     </form>
