@@ -7,10 +7,64 @@ import msal
 import requests
 from functools import wraps
 import uuid
+import logging
+from difflib import SequenceMatcher
 
 app = Flask(__name__)
 app.config.from_object(config)
 app.secret_key = os.getenv('SECRET_KEY', 'default-change-in-production')
+
+# 配置 logging 輸出到 stdout (Docker logs)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def calculate_similarity(a, b):
+    """計算兩個字串的相似度 (0-1)"""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+def tokenize(text):
+    """簡單分詞"""
+    return [word.strip() for word in text.lower().split() if len(word.strip()) > 1]
+
+def generate_tags_with_llm(title, description, content, category):
+    """使用 Claude API 自動生成 tags"""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(
+            base_url=os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        prompt_text = f"""根據以下 Prompt 信息，生成 3 個簡潔的標籤（tags）。
+                        標籤應該：
+                        - 用中文或英文表示
+                        - 代表 Prompt 的主要用途或特性
+                        - 簡短易記（1-2 個字）
+
+                        標題: {title}
+                        分類: {category}
+                        描述: {description}
+                        內容摘要: {content[:200]}
+
+    直接返回標籤列表，以逗號分隔，例如：「寫作,內容,SEO」"""
+
+        message = client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL", "claude-opus-6"),
+            max_tokens=100,
+            messages=[
+                {"role": "user", "content": prompt_text}
+            ]
+        )
+
+        tags_text = message.content[0].text.strip()
+        tags_list = [tag.strip() for tag in tags_text.split(',') if tag.strip()]
+        logger.info(f"Generated tags for '{title}': {tags_list}")
+        return tags_list
+    except Exception as e:
+        logger.error(f"Failed to generate tags with LLM: {str(e)}")
+        return []
 
 def get_or_create_category(db, category_name):
     """Get category ID by name, create if doesn't exist"""
@@ -65,9 +119,12 @@ def login():
 def auth_callback():
     """處理 AAD 登入回呼"""
     if request.args.get('state') != session.get("state"):
+        logger.warning("State mismatch in auth callback")
         return redirect(url_for("home"))
     if "error" in request.args:
-        flash(f"Login failed: {request.args['error_description']}", 'danger')
+        error_msg = request.args.get('error_description', 'Unknown error')
+        logger.warning(f"AAD login failed: {error_msg}")
+        flash(f"Login failed: {error_msg}", 'danger')
         return redirect(url_for("home"))
 
     app_msal = _build_msal_app()
@@ -90,6 +147,9 @@ def auth_callback():
                 db.add(user)
                 db.commit()
                 db.refresh(user)
+                logger.info(f"New user created: {upn} (admin={is_admin})")
+            else:
+                logger.info(f"User logged in: {upn}")
 
             session["user"] = {"upn": upn, "oid": oid, "is_admin": user.is_admin}
             session["access_token"] = result.get("access_token")
@@ -165,15 +225,24 @@ def share_prompt():
                 flash("使用者資料錯誤。", 'danger')
                 return redirect(url_for('home'))
 
-            tags_input = request.form.get("tags", "")
-            tags_list = [tag.strip() for tag in tags_input.split(',') if tag.strip()]
+            title = request.form.get("title")
+            content = request.form.get("content")
+            description = request.form.get("description")
+            category_name = request.form.get("category")
 
-            category_id = get_or_create_category(db, request.form.get("category"))
+            category_id = get_or_create_category(db, category_name)
+
+            # 用 LLM 自動生成 tags
+            tags_list = generate_tags_with_llm(title, description, content, category_name)
+            if not tags_list:
+                tags_list = []
+                logger.warning(f"No tags generated for prompt '{title}', using empty list")
+
             new_prompt = Prompt(
-                title=request.form.get("title"),
-                content=request.form.get("content"),
+                title=title,
+                content=content,
                 category_id=category_id,
-                description=request.form.get("description"),
+                description=description,
                 is_shared=True,
                 is_approved=False,
                 user_id=user.id
@@ -181,6 +250,7 @@ def share_prompt():
             new_prompt.set_tags(tags_list)
             db.add(new_prompt)
             db.commit()
+            logger.info(f"Prompt uploaded by {session['user']['upn']}: {title} (tags: {tags_list})")
             return redirect(url_for("thank_you"))
 
         return render_template("share.html", categories=categories)
@@ -238,6 +308,7 @@ def approve_prompt(prompt_id):
         if not prompt.is_approved:
             prompt.is_approved = True
             db.commit()
+            logger.info(f"Prompt {prompt_id} '{prompt.title}' approved by {session['user']['upn']}")
             flash(f"Prompt '{prompt.title}' 已成功通過審核，現在已公開。", 'success')
         return redirect(url_for("admin_review"))
     finally:
@@ -346,6 +417,7 @@ def admin_add_category():
         new_category = Category(name=category_name)
         db.add(new_category)
         db.commit()
+        logger.info(f"Category '{category_name}' added by {session['user']['upn']}")
         flash(f"分類 '{category_name}' 已成功新增。", 'success')
         return redirect(url_for('admin_categories'))
     finally:
@@ -376,6 +448,7 @@ def admin_edit_category(category_id):
             old_name = category.name
             category.name = new_name
             db.commit()
+            logger.info(f"Category '{old_name}' renamed to '{new_name}' by {session['user']['upn']}")
             flash(f"分類已成功更新：'{old_name}' → '{new_name}'。", 'success')
             return redirect(url_for('admin_categories'))
 
@@ -397,10 +470,12 @@ def admin_delete_category(category_id):
         category_name = category.name
         db.delete(category)
         db.commit()
+        logger.info(f"Category '{category_name}' deleted by {session['user']['upn']}")
         flash(f"分類 '{category_name}' 已成功刪除。", 'success')
         return redirect(url_for('admin_categories'))
     except Exception as e:
         db.rollback()
+        logger.error(f"Failed to delete category {category_id}: {str(e)}")
         flash(f"刪除失敗，該分類可能仍有相關的 Prompt。", 'danger')
         return redirect(url_for('admin_categories'))
     finally:
@@ -422,11 +497,13 @@ def get_prompt(prompt_id):
     try:
         prompt = db.query(Prompt).filter_by(id=prompt_id, is_approved=True).first()
         if not prompt:
+            logger.warning(f"Prompt {prompt_id} not found or not approved")
             return {'error': 'Prompt not found'}, 404
+        logger.info(f"Retrieved prompt {prompt_id}: {prompt.title}")
         return {
             'id': prompt.id,
             'title': prompt.title,
-            'category': prompt.category,
+            'category': prompt.category.name if prompt.category else 'Unknown',
             'description': prompt.description,
             'tags': prompt.get_tags(),
             'content': prompt.content
@@ -439,31 +516,62 @@ def get_prompt(prompt_id):
 def search_by_intent():
     """根據意圖搜尋相關 Prompts"""
     data = request.get_json()
-    intent = data.get('intent', '').lower()
+    intent = data.get('intent', '').lower().strip()
 
     if not intent:
+        logger.warning("Search attempt with empty intent")
         return {"error": "intent 不能為空"}, 400
 
     db = SessionLocal()
     try:
         approved_prompts = db.query(Prompt).filter_by(is_approved=True).all()
+        logger.info(f"Search for intent: '{intent}' - found {len(approved_prompts)} prompts to search")
 
+        intent_tokens = tokenize(intent)
         results = []
+
         for prompt in approved_prompts:
             score = 0
 
+            # 標題精確匹配 + 模糊匹配
             if intent in prompt.title.lower():
-                score += 10
+                score += 20
+            else:
+                title_sim = calculate_similarity(intent, prompt.title.lower())
+                if title_sim > 0.6:
+                    score += int(title_sim * 15)
 
-            if prompt.description and intent in prompt.description.lower():
-                score += 5
+            # 描述匹配
+            if prompt.description:
+                if intent in prompt.description.lower():
+                    score += 10
+                else:
+                    desc_sim = calculate_similarity(intent, prompt.description.lower())
+                    if desc_sim > 0.5:
+                        score += int(desc_sim * 8)
 
+            # 標籤匹配 (較高權重)
             if prompt.tags:
                 tags = prompt.get_tags()
                 for tag in tags:
                     if intent in tag.lower():
-                        score += 3
+                        score += 8
+                    else:
+                        tag_sim = calculate_similarity(intent, tag.lower())
+                        if tag_sim > 0.6:
+                            score += int(tag_sim * 6)
 
+            # 分詞匹配 (多個詞都要找到才加分)
+            title_tokens = tokenize(prompt.title)
+            desc_tokens = tokenize(prompt.description) if prompt.description else []
+            matched_tokens = sum(1 for token in intent_tokens if any(
+                token in t or calculate_similarity(token, t) > 0.7
+                for t in title_tokens + desc_tokens
+            ))
+            if matched_tokens > 0:
+                score += matched_tokens * 2
+
+            # 內容匹配 (低權重，避免過度)
             if intent in prompt.content.lower():
                 score += 1
 
@@ -480,6 +588,7 @@ def search_by_intent():
                 })
 
         results.sort(key=lambda x: x['score'], reverse=True)
+        logger.info(f"Search result: {len(results)} prompts matched for '{intent}'")
 
         return {
             'intent': intent,
